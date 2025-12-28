@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CHAKRAVYUH: Mobile Unit</title>
+  
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  
+  <style>
+    /* MOBILE-FIRST DESIGN */
+    body { 
+        background: #000; color: #fff; font-family: 'Segoe UI', sans-serif; 
+        margin: 0; padding: 0; overflow: hidden; height: 100vh; width: 100vw;
+        display: flex; flex-direction: column; align-items: center;
+    }
+    
+    /* The Camera Feed */
+    .camera-container {
+        position: relative;
+        width: 100vw;
+        height: 65vh; /* Takes up top 65% of phone screen */
+        background: #111;
+        overflow: hidden;
+    }
+    .input_video { display: none; }
+    .output_canvas { 
+        width: 100%; height: 100%; 
+        object-fit: cover; 
+        transform: scaleX(-1);
+    }
+
+    /* The Dashboard (Bottom Control Panel) */
+    .dashboard {
+        width: 100vw;
+        height: 35vh;
+        background: #1a1a1a;
+        border-top: 2px solid #333;
+        display: flex; flex-direction: column; align-items: center; justify-content: start;
+        padding-top: 15px;
+        box-shadow: 0 -10px 30px rgba(0,255,100,0.1);
+        z-index: 100;
+    }
+
+    /* Status Display */
+    .status-value { 
+        font-size: 32px; font-weight: 900; margin-bottom: 5px; 
+        text-shadow: 0 0 10px rgba(255,255,255,0.2);
+    }
+    .status-sub { font-size: 12px; color: #888; letter-spacing: 1px; }
+
+    /* Progress Bar */
+    .bar-container { 
+        width: 80%; height: 8px; background: #333; border-radius: 10px; 
+        overflow: hidden; margin: 15px 0;
+    }
+    .bar-fill { height: 100%; width: 0%; background: #0f0; transition: width 0.05s linear; }
+
+    /* Configuration Panel */
+    .config-row { display: flex; gap: 10px; margin-top: 5px; }
+    select, input {
+        background: #222; border: 1px solid #444; color: #fff;
+        padding: 10px; border-radius: 5px; font-size: 14px;
+    }
+    select { width: 140px; }
+    input { width: 120px; text-align: center; }
+
+    /* Alarm Overlay */
+    #alarm-overlay { 
+        position: fixed; top:0; left:0; width:100%; height:100%; 
+        background: rgba(255,0,0,0.5); display:none; 
+        z-index: 999; pointer-events: none;
+        animation: pulse 0.5s infinite;
+    }
+    @keyframes pulse { 0% {opacity:0.5;} 50% {opacity:0.1;} 100% {opacity:0.5;} }
+    
+    /* Tutorial Overlay */
+    #tap-start {
+        position: fixed; top:0; left:0; width:100%; height:100%;
+        background: rgba(0,0,0,0.8); z-index: 1000;
+        display: flex; align-items: center; justify-content: center;
+        flex-direction: column; text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="tap-start" onclick="this.style.display='none'; startApp();">
+    <div style="font-size:40px;">👆</div>
+    <h2 style="margin:10px 0;">TAP TO ACTIVATE</h2>
+    <p style="color:#aaa;">Enable Camera & Audio</p>
+  </div>
+
+  <div id="alarm-overlay"></div>
+
+  <div class="camera-container">
+    <video class="input_video" playsinline webkit-playsinline></video>
+    <canvas class="output_canvas"></canvas>
+  </div>
+
+  <div class="dashboard">
+    <div class="status-sub">DETECTED INTENT</div>
+    <div class="status-value" id="main-status">SCANNING...</div>
+    
+    <div class="bar-container">
+        <div class="bar-fill" id="lock-bar"></div>
+    </div>
+
+    <div class="config-row">
+        <select id="action-type">
+            <option value="call_police">📞 Police (100)</option>
+            <option value="call_ambulance">🚑 Ambulance (108)</option>
+            <option value="call_custom">👤 Contact</option>
+        </select>
+        <input type="tel" id="phone-number" value="100" placeholder="Number">
+    </div>
+    
+    <div style="font-size:10px; color:#555; margin-top:10px;">SHOW 5 FINGERS (THUMB OUT) TO TRIGGER</div>
+  </div>
+
+  <script type="module">
+    const videoElement = document.getElementsByClassName('input_video')[0];
+    const canvasElement = document.getElementsByClassName('output_canvas')[0];
+    const canvasCtx = canvasElement.getContext('2d');
+    
+    const mainStatus = document.getElementById('main-status');
+    const lockBar = document.getElementById('lock-bar');
+    const alarmOverlay = document.getElementById('alarm-overlay');
+    const actionSelector = document.getElementById('action-type');
+    const phoneInput = document.getElementById('phone-number');
+
+    let lockTimer = 0;
+    let currentStableGesture = "";
+    let lastSpoken = "";
+    let sosTriggered = false;
+
+    const synth = window.speechSynthesis;
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Auto-fill numbers
+    actionSelector.addEventListener('change', (e) => {
+        if(e.target.value === 'call_police') phoneInput.value = "100";
+        else if(e.target.value === 'call_ambulance') phoneInput.value = "108";
+        else phoneInput.value = ""; 
+    });
+
+    window.startApp = function() {
+        if(audioCtx.state==='suspended') audioCtx.resume();
+        camera.start();
+        speak("System Online");
+    }
+
+    function beep() {
+        const o=audioCtx.createOscillator(); const g=audioCtx.createGain();
+        o.connect(g); g.connect(audioCtx.destination);
+        o.type='sawtooth'; o.frequency.value=600;
+        o.start(); setTimeout(()=>o.stop(),200);
+    }
+
+    function speak(text) {
+        if(synth.speaking)return;
+        const u=new SpeechSynthesisUtterance(text);
+        synth.speak(u);
+    }
+
+    function executeRescue() {
+        if (sosTriggered) return;
+        sosTriggered = true;
+        const number = phoneInput.value || "100";
+        
+        speak("Emergency Call Initiated");
+        
+        setTimeout(() => {
+            window.location.href = `tel:${number}`;
+            setTimeout(() => { sosTriggered = false; }, 10000);
+        }, 1000);
+    }
+
+    function getAngle(a, b, c) {
+        const v1 = {x:a.x-b.x, y:a.y-b.y};
+        const v2 = {x:c.x-b.x, y:c.y-b.y};
+        const dot = v1.x*v2.x + v1.y*v2.y;
+        const mag1 = Math.sqrt(v1.x*v1.x + v1.y*v1.y);
+        const mag2 = Math.sqrt(v2.x*v2.x + v2.y*v2.y);
+        return Math.acos(dot/(mag1*mag2))*(180/Math.PI);
+    }
+
+    function onResults(results) {
+      // Scale canvas to match window size for mobile
+      canvasElement.width = window.innerWidth;
+      canvasElement.height = window.innerHeight * 0.65;
+      
+      canvasCtx.save();
+      canvasCtx.clearRect(0,0,canvasElement.width,canvasElement.height);
+      canvasCtx.drawImage(results.image,0,0,canvasElement.width,canvasElement.height);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const lm = results.multiHandLandmarks[0];
+        drawConnectors(canvasCtx, lm, HAND_CONNECTIONS, {color:'#0f0', lineWidth:2});
+        drawLandmarks(canvasCtx, lm, {color:'#fff', lineWidth:1});
+
+        const iOpen = getAngle(lm[5],lm[6],lm[8]) > 150;
+        const mOpen = getAngle(lm[9],lm[10],lm[12]) > 150;
+        const rOpen = getAngle(lm[13],lm[14],lm[16]) > 150;
+        const pOpen = getAngle(lm[17],lm[18],lm[20]) > 150;
+        const mainCount = [iOpen, mOpen, rOpen, pOpen].filter(Boolean).length;
+
+        const thumbTip = lm[4];
+        const indexBase = lm[5];
+        const thumbSpread = Math.abs(thumbTip.x - indexBase.x);
+        const isThumbOpen = thumbSpread > 0.08; 
+
+        let intent = "SCANNING...";
+        let color = "#555";
+        let phrase = "";
+
+        if (mainCount === 4) {
+            if (isThumbOpen) {
+                intent = "!!! SOS !!!"; color = "red"; phrase = "Emergency SOS";
+            } else {
+                intent = "EXHAUSTED"; color = "#d8bfd8"; phrase = "I am exhausted";
+            }
+        }
+        else if (mainCount === 0 && !isThumbOpen) {
+            intent = "CONFIRM"; color="yellow"; phrase="Yes";
+        }
+        else if (mainCount === 1 && iOpen) {
+            intent = "WATER"; color="cyan"; phrase="I need water";
+        }
+        else if (mainCount === 2 && iOpen && mOpen) {
+            intent = "OKAY"; color="lime"; phrase="I am okay";
+        }
+        else if (mainCount === 3 && iOpen && mOpen && rOpen) {
+             intent = "PAIN"; color="orange"; phrase="I am in pain";
+        }
+
+        if (intent === currentStableGesture && intent !== "SCANNING...") {
+            if(lockTimer < 100) lockTimer += 5;
+        } else {
+            lockTimer = 0;
+            currentStableGesture = intent;
+        }
+
+        lockBar.style.width = lockTimer + "%";
+        lockBar.style.backgroundColor = color;
+
+        if (lockTimer >= 100) {
+            mainStatus.innerText = intent;
+            mainStatus.style.color = color;
+            
+            if (intent === "!!! SOS !!!") {
+                alarmOverlay.style.display = "block";
+                if(Date.now()%500 < 50) beep();
+                executeRescue(); // Calls Police
+            } else {
+                alarmOverlay.style.display = "none";
+                sosTriggered = false;
+            }
+
+            if (phrase && intent !== lastSpoken) {
+                speak(phrase);
+                lastSpoken = intent;
+            }
+        } else {
+            mainStatus.innerText = "SCANNING...";
+            mainStatus.style.color = "#aaa";
+            alarmOverlay.style.display = "none";
+        }
+      } else {
+        mainStatus.innerText = "NO HAND";
+        lockTimer = 0;
+      }
+      canvasCtx.restore();
+    }
+
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({maxNumHands:1, modelComplexity:0, minDetectionConfidence:0.5, minTrackingConfidence:0.5}); // Lite Mode for Mobile
+    hands.onResults(onResults);
+
+    // Force Front Camera on Mobile
+    const camera = new Camera(videoElement, {
+      onFrame: async()=>{await hands.send({image:videoElement})}, 
+      width: 480, height: 640, // Vertical Resolution
+      facingMode: "user" 
+    });
+    
+    // Start only after click (handled by tap-start overlay)
+  </script>
+</body>
+</html>
